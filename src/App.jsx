@@ -6,13 +6,16 @@ import {
   SettlementMethod,
   Blockchain,
   useOmniston,
+  useTrackTrade,
 } from "@ston-fi/omniston-sdk-react";
+import { TonClient, Address, Cell, beginCell, storeMessage } from "@ton/ton";
 
 function App() {
   const [assets, setAssets] = useState([]);
   const [fromAsset, setFromAsset] = useState(null);
   const [toAsset, setToAsset] = useState(null);
   const [amount, setAmount] = useState("");
+  const [outgoingTxHash, setOutgoingTxHash] = useState("");
   const walletAddress = useTonAddress();
   const [tonConnect] = useTonConnectUI();
 
@@ -91,6 +94,21 @@ function App() {
     }
   );
 
+  const {
+    isLoading: trackingLoading,
+    error: trackingError,
+    data: tradeStatus,
+  } = useTrackTrade({
+    quoteId: quote?.quote?.quoteId,
+    traderWalletAddress: {
+      blockchain: Blockchain.TON,
+      address: walletAddress,
+    },
+    outgoingTxHash,
+  }, {
+    enabled: !!quote?.quote?.quoteId && !!walletAddress && !!outgoingTxHash,
+  });
+
   async function buildTx() {
     if (!quote || !walletAddress) {
       alert("Please connect your wallet and ensure a valid quote is loaded.");
@@ -118,12 +136,61 @@ function App() {
     }
   }
 
+  console.log(tradeStatus, trackingLoading, trackingError);
+
+  // Utility function to retry an async operation
+const retry = async (fn, { retries = 5, delay = 1000 }) => {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries === 0) throw error;
+    await new Promise(resolve => setTimeout(resolve, delay));
+    return retry(fn, { retries: retries - 1, delay });
+  }
+};
+
+const getTxByBOC = async (exBoc, walletAddress) => {
+  if (!exBoc || !walletAddress) {
+    throw new Error('Missing required parameters for transaction tracking');
+  }
+
+  const client = new TonClient({
+    endpoint: 'https://toncenter.com/api/v2/jsonRPC'
+  });
+
+  const myAddress = Address.parse(walletAddress);
+
+  return retry(async () => {
+    const transactions = await client.getTransactions(myAddress, {
+      limit: 5,
+    });
+
+    for (const tx of transactions) {
+      const inMsg = tx.inMessage;
+      if (inMsg?.info.type === 'external-in') {
+        const inBOC = inMsg?.body;
+        if (typeof inBOC === 'undefined') {
+          continue;
+        }
+
+        const extHash = Cell.fromBase64(exBoc).hash().toString('hex');
+        const inHash = beginCell().store(storeMessage(inMsg)).endCell().hash().toString('hex');
+
+        if (extHash === inHash) {
+          return tx.hash().toString('hex');
+        }
+      }
+    }
+    throw new Error('Transaction not found');
+  }, { retries: 30, delay: 1000 });
+}; 
+
   async function handleSwap() {
     const messages = await buildTx();
     if (!messages) return;
     
     try {
-      await tonConnect.sendTransaction({
+      const res = await tonConnect.sendTransaction({
         validUntil: Date.now() + 1000000,
         messages: messages.map((message) => ({
           address: message.targetAddress,
@@ -131,6 +198,10 @@ function App() {
           payload: message.payload,
         })),
       });
+
+      const exBoc = res.boc;
+      const txHash = await getTxByBOC(exBoc, walletAddress);
+      setOutgoingTxHash(txHash);
     } catch (err) {
       console.error("Error sending transaction:", err);
       alert("Failed to send transaction. Check console for details.");
@@ -146,6 +217,19 @@ function App() {
         </div>
 
         <div className="h-px bg-gray-200 w-full my-4"></div>
+
+        {/* Trade status */}
+        <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+          {trackingLoading && <p className="text-sm text-blue-600">Tracking trade...</p>}
+          {trackingError && (
+            <p className="text-sm text-orange-600">Trade tracking error: {String(trackingError)}</p>
+          )}
+          {tradeStatus?.tradeSettled && (
+            <p className="text-sm text-green-600">
+              Trade Result: {tradeStatus.status.tradeSettled?.result}
+            </p>
+          )}
+        </div>
 
         {assets.length > 0 ? (
           <div className="space-y-6">
