@@ -1,12 +1,22 @@
-import { useEffect, useState } from 'react';
-import { StonApiClient, AssetTag } from '@ston-fi/api';
-import { TonConnectButton } from '@tonconnect/ui-react';
+import { useEffect, useState } from "react";
+import { StonApiClient, AssetTag } from "@ston-fi/api";
+import { TonConnectButton, useTonAddress, useTonConnectUI } from "@tonconnect/ui-react";
+import {
+  useRfq,
+  SettlementMethod,
+  Blockchain,
+  useOmniston,
+} from "@ston-fi/omniston-sdk-react";
 
 function App() {
   const [assets, setAssets] = useState([]);
   const [fromAsset, setFromAsset] = useState(null);
   const [toAsset, setToAsset] = useState(null);
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = useState("");
+  const walletAddress = useTonAddress();
+  const [tonConnect] = useTonConnectUI();
+
+  const omniston = useOmniston();
 
   // fetch assets on mount
   useEffect(() => {
@@ -17,8 +27,8 @@ function App() {
         const condition = [
           AssetTag.LiquidityVeryHigh,
           AssetTag.LiquidityHigh,
-          AssetTag.LiquidityMedium
-        ].join(' | ');
+          AssetTag.LiquidityMedium,
+        ].join(" | ");
         const assetList = await client.queryAssets({ condition });
 
         setAssets(assetList);
@@ -29,11 +39,103 @@ function App() {
           setToAsset(assetList[1]);
         }
       } catch (err) {
-        console.error('Failed to fetch assets:', err);
+        console.error("Failed to fetch assets:", err);
       }
     };
     fetchAssets();
   }, []);
+
+  // Helper to get decimals from asset with default fallback
+  const getDecimals = (asset) => asset?.meta?.decimals ?? 9;
+
+  // Helper to calculate conversion factor based on decimals
+  const getConversionFactor = (asset) => 10 ** getDecimals(asset);
+
+  function toBaseUnits(asset, amt) {
+    if (!asset || !amt) return "0";
+    return Math.floor(parseFloat(amt) * getConversionFactor(asset)).toString();
+  }
+
+  function fromBaseUnits(asset, baseUnits) {
+    if (!asset || !baseUnits) return "0";
+    return (parseInt(baseUnits) / getConversionFactor(asset)).toFixed(2);
+  }
+
+  const {
+    data: quote,
+    isLoading: quoteLoading,
+    error: quoteError,
+  } = useRfq(
+    {
+      settlementMethods: [SettlementMethod.SETTLEMENT_METHOD_SWAP],
+      offerAssetAddress: fromAsset
+        ? { blockchain: Blockchain.TON, address: fromAsset.contractAddress }
+        : undefined,
+      askAssetAddress: toAsset
+        ? { blockchain: Blockchain.TON, address: toAsset.contractAddress }
+        : undefined,
+      amount: {
+        offerUnits: fromAsset ? toBaseUnits(fromAsset, amount) : "0",
+      },
+      settlementParams: {
+        // example: allow up to 5% slippage, max 4 outgoing messages
+        max_price_slippage_bps: 500,
+        max_outgoing_messages: 4,
+      },
+    },
+    {
+      enabled:
+        !!fromAsset?.contractAddress &&
+        !!toAsset?.contractAddress &&
+        amount !== "",
+    }
+  );
+
+  async function buildTx() {
+    if (!quote || !walletAddress) {
+      alert("Please connect your wallet and ensure a valid quote is loaded.");
+      return null;
+    }
+
+    try {
+      const tx = await omniston.buildTransfer({
+        quote: quote.quote,
+        sourceAddress: {
+          blockchain: Blockchain.TON,
+          address: walletAddress, // the wallet sending the offer token
+        },
+        destinationAddress: {
+          blockchain: Blockchain.TON,
+          address: walletAddress, // the same wallet receiving the ask token
+        },
+      });
+
+      return tx.ton?.messages || [];
+    } catch (err) {
+      console.error("Error building transaction:", err);
+      alert("Failed to build transaction. Check console for details.");
+      return null;
+    }
+  }
+
+  async function handleSwap() {
+    const messages = await buildTx();
+    if (!messages) return;
+    
+    try {
+      await tonConnect.sendTransaction({
+        validUntil: Date.now() + 1000000,
+        messages: messages.map((message) => ({
+          address: message.targetAddress,
+          amount: message.sendAmount,
+          payload: message.payload,
+        })),
+      });
+    } catch (err) {
+      console.error("Error sending transaction:", err);
+      alert("Failed to send transaction. Check console for details.");
+    }
+  }
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-blue-50 to-indigo-100 p-6">
@@ -53,19 +155,21 @@ function App() {
                 From
               </label>
               <select
-                value={fromAsset?.contractAddress || ''}
+                value={fromAsset?.contractAddress || ""}
                 onChange={(e) => {
-                  const selected = assets.find(a => a.contractAddress === e.target.value);
+                  const selected = assets.find(
+                    (a) => a.contractAddress === e.target.value
+                  );
                   setFromAsset(selected);
                 }}
                 className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
               >
-                {assets.map(asset => (
+                {assets.map((asset) => (
                   <option
                     key={asset.contractAddress}
                     value={asset.contractAddress}
                   >
-                    {asset.meta?.symbol || asset.meta?.displayName || 'token'}
+                    {asset.meta?.symbol || asset.meta?.displayName || "token"}
                   </option>
                 ))}
               </select>
@@ -77,19 +181,21 @@ function App() {
                 To
               </label>
               <select
-                value={toAsset?.contractAddress || ''}
+                value={toAsset?.contractAddress || ""}
                 onChange={(e) => {
-                  const selected = assets.find(a => a.contractAddress === e.target.value);
+                  const selected = assets.find(
+                    (a) => a.contractAddress === e.target.value
+                  );
                   setToAsset(selected);
                 }}
                 className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
               >
-                {assets.map(asset => (
+                {assets.map((asset) => (
                   <option
                     key={asset.contractAddress}
                     value={asset.contractAddress}
                   >
-                    {asset.meta?.symbol || asset.meta?.displayName || 'token'}
+                    {asset.meta?.symbol || asset.meta?.displayName || "token"}
                   </option>
                 ))}
               </select>
@@ -119,10 +225,39 @@ function App() {
             <p className="ml-3 text-gray-600">Loading assets...</p>
           </div>
         )}
+
+        {/* Quote section */}
+        <div className="pt-4">
+          {quoteLoading && <p>Loading quote...</p>}
+          {quoteError && (
+            <p className="text-red-500">Error: {String(quoteError)}</p>
+          )}
+          {quote && (
+            <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
+              <p className="font-semibold text-gray-700">Quote Info</p>
+              <p className="text-sm text-gray-600">
+                Resolver: {quote.quote.resolverName}
+              </p>
+              <p className="text-sm text-gray-600">
+                Offer Units: {fromBaseUnits(fromAsset, quote.quote.offerUnits)} {fromAsset.meta?.symbol}
+              </p>
+              <p className="text-sm text-gray-600">
+                Ask Units: {fromBaseUnits(toAsset, quote.quote.askUnits)} {toAsset.meta?.symbol}
+              </p>
+            </div>
+          )}
+        </div>
+
+        <button
+          onClick={handleSwap}
+          className="mt-4 w-full bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-3 px-4 rounded-lg transition-all"
+        >
+          Build Transaction
+        </button>
       </div>
 
       <div className="mt-6 text-center text-xs text-gray-500">
-        Powered by Omniston
+        Powered by Ston.fi
       </div>
     </div>
   );
