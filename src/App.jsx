@@ -18,8 +18,15 @@ function App() {
   const [outgoingTxHash, setOutgoingTxHash] = useState("");
   const walletAddress = useTonAddress();
   const [tonConnect] = useTonConnectUI();
+  const [tradedQuote, setTradedQuote] = useState(null);
 
   const omniston = useOmniston();
+
+  // Reset outgoingTxHash when inputs change
+  useEffect(() => {
+    setTradedQuote("");
+    setOutgoingTxHash("");
+  }, [fromAsset, toAsset, amount]);
 
   // fetch assets on mount
   useEffect(() => {
@@ -90,7 +97,8 @@ function App() {
       enabled:
         !!fromAsset?.contractAddress &&
         !!toAsset?.contractAddress &&
-        amount !== "",
+        amount !== "" &&
+        !outgoingTxHash,
     }
   );
 
@@ -99,25 +107,44 @@ function App() {
     error: trackingError,
     data: tradeStatus,
   } = useTrackTrade({
-    quoteId: quote?.quote?.quoteId,
+    quoteId: tradedQuote?.quote?.quoteId,
     traderWalletAddress: {
       blockchain: Blockchain.TON,
       address: walletAddress,
     },
     outgoingTxHash,
   }, {
-    enabled: !!quote?.quote?.quoteId && !!walletAddress && !!outgoingTxHash,
+    enabled: !!tradedQuote?.quote?.quoteId && !!walletAddress && !!outgoingTxHash,
   });
 
-  async function buildTx() {
-    if (!quote || !walletAddress) {
+  // Function to translate trade result to human-readable text
+  const getTradeResultText = (status) => {
+    if (!status?.tradeSettled) return "";
+    
+    const result = status.tradeSettled.result;
+    switch (result) {
+      case "TRADE_RESULT_FULLY_FILLED":
+        return "Trade completed successfully and fully filled";
+      case "TRADE_RESULT_PARTIALLY_FILLED":
+        return "Trade partially filled - something went wrong";
+      case "TRADE_RESULT_ABORTED":
+        return "Trade was aborted";
+      case "TRADE_RESULT_UNKNOWN":
+      case "UNRECOGNIZED":
+      default:
+        return "Unknown trade result";
+    }
+  };
+
+  async function buildTx(willTradedQuote) {
+    if (!willTradedQuote || !walletAddress) {
       alert("Please connect your wallet and ensure a valid quote is loaded.");
       return null;
     }
 
     try {
       const tx = await omniston.buildTransfer({
-        quote: quote.quote,
+        quote: willTradedQuote.quote,
         sourceAddress: {
           blockchain: Blockchain.TON,
           address: walletAddress, // the wallet sending the offer token
@@ -135,8 +162,6 @@ function App() {
       return null;
     }
   }
-
-  console.log(tradeStatus, trackingLoading, trackingError);
 
   // Utility function to retry an async operation
 const retry = async (fn, { retries = 5, delay = 1000 }) => {
@@ -186,10 +211,14 @@ const getTxByBOC = async (exBoc, walletAddress) => {
 }; 
 
   async function handleSwap() {
-    const messages = await buildTx();
+    const willTradedQuote = quote;
+    const messages = await buildTx(willTradedQuote);
     if (!messages) return;
     
     try {
+      // Store the quote at the time of trade
+      setTradedQuote(willTradedQuote);
+      
       const res = await tonConnect.sendTransaction({
         validUntil: Date.now() + 1000000,
         messages: messages.map((message) => ({
@@ -224,9 +253,9 @@ const getTxByBOC = async (exBoc, walletAddress) => {
           {trackingError && (
             <p className="text-sm text-orange-600">Trade tracking error: {String(trackingError)}</p>
           )}
-          {tradeStatus?.tradeSettled && (
+          {tradeStatus?.status?.tradeSettled && (
             <p className="text-sm text-green-600">
-              Trade Result: {tradeStatus.status.tradeSettled?.result}
+              Trade Result: {getTradeResultText(tradeStatus.status)}
             </p>
           )}
         </div>
