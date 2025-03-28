@@ -89,8 +89,8 @@ function App() {
       },
       settlementParams: {
         // example: allow up to 5% slippage, max 4 outgoing messages
-        max_price_slippage_bps: 500,
-        max_outgoing_messages: 4,
+        maxPriceSlippageBps: 500,
+        maxOutgoingMessages: 4,
       },
     },
     {
